@@ -43,6 +43,7 @@ description: Use for a business behavior change that needs Example Mapping, Supe
 ## 逐项执行与续接
 
 - 先从 `flow status <需求ID>` 定位当前任务，再读该任务文件、它引用的示例和必要的依赖证据。用 `flow start <需求ID> T01` 开工。实现时核对实际差异与边界。
+- 当前任务需要写入或修改代码时，先设置本任务的 `execute` 审计上下文，再于动手前读取 [Ponytail 编码规则](references/ponytail/SKILL.md)。在已确认的任务范围内使用其 “Before you write” 和 “The smallest complete change” 两节（Full）。优先复用项目现有实现，选择完整满足验收的最小改动，保留必要的校验、错误处理和可访问性。任务边界、仓库约定和验证仍按现有工作流执行。读取后用 `flow skill <需求ID> ponytail --stage execute --task T01 --purpose "应用最小完整改动规则"` 声明，并用 `--evidence` 附上模板的实际路径。
 - 用 `flow verify <需求ID> -- <验证命令及参数>` 记录实际测试和回归结果，随后用 `flow audit <需求ID> T01` 展示 Skill、允许范围、实际差异和验证结果。请负责人看完差异后用 `flow review <需求ID> T01 accept|rework` 记录判断。经负责人明确授权也可代记原决定。接受后再推进。必要时用 `flow verify <需求ID> --task T01 -- <命令>` 复验已通过任务。
 - 缺口用 `flow block` 记录。业务决定用 `decision`，取证缺口用 `evidence`，外部条件用 `external`。后两类补齐后用 `flow resolve`。业务决定由负责人确认后再登记 `flow confirm`。
 - 新的业务想法从当前代码和测试重新走一个聚焦需求。同一轮其余已确认且不受影响的任务沿用。交付后本地工作状态可清理，长期业务约束由项目代码、测试和现行规范承载。

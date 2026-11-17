@@ -26,6 +26,8 @@ pi --skill /path/to/AIWorkflow/skills/ai-workflow/SKILL.md \
 
 语言编码规范可按需单独加载：[Swift API 设计指南](skills/swift-api-design-guidelines/SKILL.md) 和 [Objective-C Cocoa 编码与 API 约定](skills/objective-c-cocoa-guidelines/SKILL.md)。它们补充语言层面的 API 设计与编码建议，不替代业务仓库自身的 `AGENTS.md` 和项目约定。
 
+实现代码时，AIWorkflow 会按任务读取 [Ponytail 编码规则](skills/ai-workflow/references/ponytail/SKILL.md)，用它约束实现规模和代码复用，并在对应任务记录 Skill 使用。模板与 [MIT 许可](skills/ai-workflow/references/ponytail/LICENSE) 随仓库保存。[上游固定版本](https://github.com/DietrichGebert/ponytail/blob/96608e078b2d5ea607c5c3b8b5a54d1c1fba6846/skills/ponytail/SKILL.md)
+
 ## 从需求到交付
 
 1. Agent 只读调查源码、业务规则和测试。按 [Example Mapping](https://cucumber.io/docs/bdd/example-mapping/) 填写故事、规则、示例和未决问题，再用 Superpowers 确认设计、拆分任务。空任务模板会在确认时提示缺失字段。
