@@ -80,6 +80,294 @@ class WorkflowTest(unittest.TestCase):
     def confirm(self, requirement, task):
         return self.ok("confirm", requirement, task, "--statement", "现在返回旧值。本次增加相同金额重试，保留只扣款一次。")
 
+    def graph_task(self, requirement='graph', task='T01', *, mode='--graphify-context', after=None, legacy=False):
+        from graphify_helpers import install_graphify
+        if not (self.repo / '.ai-workflow' / requirement).exists():
+            self.init(requirement, audited=True)
+        bin_dir = self.repo / '.ai-workflow' / 'bin'
+        bin_dir.mkdir(exist_ok=True)
+        install_graphify(bin_dir)
+        from unittest.mock import patch
+        env = patch.dict(os.environ, {'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']})
+        env.start()
+        self.addCleanup(env.stop)
+        (self.repo / 'app.py').write_text('def main():\n    return 1\n')
+        (self.repo / 'rules.md').write_text('keep behavior')
+        self.ok('add', requirement, task, '--title', '代码改动', '--example', 'E01', mode,
+                *('--after', after) if after else ())
+        path = self.repo / '.ai-workflow' / requirement / 'tasks' / f'{task}.md'
+        content = path.read_text()
+        fields = {**SECTIONS, '修改范围': '- MODIFY app.py',
+                  'Graphify 与只读证据范围': '- READ_ONLY_EVIDENCE rules.md',
+                  'Graphify 依赖证据': 'EXTRACTED app.py:1，已核对源码',
+                  '流程变化与确定编码上下文': 'main 返回 1 → 2，保持无副作用，E01'}
+        for heading, body in fields.items():
+            content = content.replace(f'## {heading}\n\n', f'## {heading}\n\n{body}\n')
+        if legacy:
+            content = content.replace('"version": 2', '"version": 1')
+        path.write_text(content)
+        return path
+
+    def test_before_binds_only_task_inputs(self):
+        path = self.graph_task()
+        self.ok('graphify', 'graph', 'T01')
+        self.confirm('graph', 'T01')
+        (self.repo / 'unrelated.txt').write_text('unrelated')
+        self.ok('start', 'graph', 'T01')
+        self.ok('block', 'graph', '--kind', 'external', '--issue', 'pause', '--impact', 'test', '--next', 'resume')
+        self.ok('resolve', 'graph', 'T01', '--detail', 'resume')
+        for name in ('app.py', 'rules.md'):
+            original = (self.repo / name).read_text()
+            (self.repo / name).write_text(original + '\nchanged\n')
+            self.assertNotEqual(self.flow('start', 'graph', 'T01').returncode, 0)
+            (self.repo / name).write_text(original)
+        self.ok('start', 'graph', 'T01')
+
+    def test_legacy_graphify_context_remains_readable(self):
+        self.graph_task(legacy=True)
+        self.ok('graphify', 'graph', 'T01')
+        self.confirm('graph', 'T01')
+        self.ok('start', 'graph', 'T01')
+        (self.repo / 'app.py').write_text('def main():\n    return 2\n')
+        self.ok('verify', 'graph', '--', sys.executable, '-c', 'assert True')
+        self.ok('review', 'graph', 'T01', 'accept')
+
+    def test_completed_dependency_does_not_require_before_source(self):
+        self.graph_task(legacy=True)
+        self.task('graph', 'T02', after='T01')
+        self.confirm('graph', 'T02')
+        self.ok('graphify', 'graph', 'T01')
+        self.confirm('graph', 'T01')
+        self.ok('start', 'graph', 'T01')
+        (self.repo / 'app.py').write_text('def main():\n    return 2\n')
+        self.ok('verify', 'graph', '--', sys.executable, '-c', 'assert True')
+        self.ok('review', 'graph', 'T01', 'accept')
+        self.ok('start', 'graph', 'T02')
+
+    def test_unflagged_task_never_runs_graphify(self):
+        self.init('plain', audited=True)
+        self.task('plain', 'T01')
+        self.confirm('plain', 'T01')
+        self.ok('start', 'plain', 'T01')
+        self.ok('verify', 'plain', '--', sys.executable, '-c', 'assert True')
+        self.ok('review', 'plain', 'T01', 'accept')
+        self.assertFalse((self.repo / '.ai-workflow/plain/graphify-scope').exists())
+
+    def graph_record(self, phase='after'):
+        import json
+        path = self.repo / '.ai-workflow/graph/tasks/T01.md'
+        records = [json.loads(line[2:]) for line in path.read_text().splitlines()
+                   if line.startswith('- {"kind": ')]
+        return next(r for r in reversed(records)
+                    if r['kind'] == 'graphify_context' and r.get('phase', 'before') == phase)
+
+    def prepare_delivery(self, *, audit_only=False):
+        self.graph_task(mode='--graphify-audit' if audit_only else '--graphify-context')
+        if not audit_only:
+            self.ok('graphify', 'graph', 'T01')
+        self.confirm('graph', 'T01')
+        self.ok('start', 'graph', 'T01')
+        (self.repo / 'app.py').write_text('def main():\n    return 2\n')
+        self.ok('verify', 'graph', '--', sys.executable, '-c', 'assert True')
+
+    def complete_graph_report(self):
+        record = self.graph_record()
+        path = self.repo / '.ai-workflow/graph' / record['report']
+        text = path.read_text()
+        for heading, body in {
+            '实际流程': 'main() 返回 2，入口和出口均无外部调用。',
+            '条件、异常与副作用': '无分支和副作用；保留原异常传播方式。',
+            '保留行为': '函数签名及无副作用保持不变。',
+            '规则、示例与验证': 'R01 / E01；本任务验证日志确认成功。',
+            '源码核验': 'EXTRACTED app.py:1-2，已逐行核对 return 2。',
+            '未解析边界': '本例无动态依赖；图不证明完整业务语义。',
+        }.items():
+            text = text.replace(f'## {heading}\n\n待核验', f'## {heading}\n\n{body}')
+        path.write_text(text)
+
+    def seal_delivery(self):
+        self.ok('graphify', 'graph', 'T01', '--phase', 'after')
+        self.complete_graph_report()
+        self.ok('graphify', 'graph', 'T01', '--phase', 'after', '--seal')
+
+    def test_audit_only_confirms_without_graph(self):
+        self.prepare_delivery(audit_only=True)
+        self.assertFalse((self.repo / '.ai-workflow/graph/graphify-scope/T01/before').exists())
+        self.assertNotEqual(self.flow('review', 'graph', 'T01', 'accept').returncode, 0)
+        self.seal_delivery()
+        record = self.graph_record()
+        report = (self.repo / '.ai-workflow/graph' / record['report']).read_text()
+        self.assertIn('无前置图', report)
+        self.ok('review', 'graph', 'T01', 'accept')
+
+    def test_before_is_immutable_after_delivery(self):
+        self.prepare_delivery()
+        before = self.graph_record('before')
+        original = (self.repo / '.ai-workflow/graph' / before['manifest']).read_bytes()
+        self.seal_delivery()
+        self.assertEqual((self.repo / '.ai-workflow/graph' / before['manifest']).read_bytes(), original)
+        self.assertNotEqual(before['graph'], self.graph_record()['graph'])
+        self.ok('review', 'graph', 'T01', 'accept')
+
+    def test_report_requires_source_verified_flow(self):
+        self.prepare_delivery()
+        self.ok('graphify', 'graph', 'T01', '--phase', 'after')
+        result = self.flow('graphify', 'graph', 'T01', '--phase', 'after', '--seal')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('核验', result.stderr)
+        self.complete_graph_report()
+        self.ok('graphify', 'graph', 'T01', '--phase', 'after', '--seal')
+        self.ok('review', 'graph', 'T01', 'accept')
+
+    def test_after_requires_successful_current_verification(self):
+        self.graph_task()
+        self.assertNotEqual(self.flow('graphify', 'graph', 'T01', '--phase', 'after').returncode, 0)
+        self.ok('graphify', 'graph', 'T01')
+        self.confirm('graph', 'T01')
+        self.ok('start', 'graph', 'T01')
+        self.flow('verify', 'graph', '--', sys.executable, '-c', 'exit(1)')
+        self.assertNotEqual(self.flow('graphify', 'graph', 'T01', '--phase', 'after').returncode, 0)
+        self.ok('verify', 'graph', '--', sys.executable, '-c', 'assert True')
+        self.assertFalse((self.repo / '.ai-workflow/graph/graphify-scope/T01/after').exists())
+        (self.repo / 'app.py').write_text('changed after verify')
+        self.assertNotEqual(self.flow('graphify', 'graph', 'T01', '--phase', 'after').returncode, 0)
+
+    def test_callflow_export_failure_blocks_acceptance(self):
+        from unittest.mock import patch
+        self.prepare_delivery()
+        with patch.dict(os.environ, {'GRAPHIFY_TEST_EXPORT_FAIL': '1'}):
+            self.assertNotEqual(self.flow('graphify', 'graph', 'T01', '--phase', 'after').returncode, 0)
+        self.assertNotEqual(self.flow('review', 'graph', 'T01', 'accept').returncode, 0)
+
+    def test_review_rejects_stale_or_tampered_audit(self):
+        self.prepare_delivery()
+        self.seal_delivery()
+        record = self.graph_record()
+        for key in ('graph', 'callflow', 'report'):
+            path = self.repo / '.ai-workflow/graph' / record[key]
+            original = path.read_bytes()
+            path.write_bytes(original + b'changed')
+            self.assertNotEqual(self.flow('review', 'graph', 'T01', 'accept').returncode, 0)
+            path.write_bytes(original)
+        (self.repo / 'rules.md').write_text('changed ignored evidence')
+        self.assertNotEqual(self.flow('review', 'graph', 'T01', 'accept').returncode, 0)
+        (self.repo / 'rules.md').write_text('keep behavior')
+        self.ok('verify', 'graph', '--', sys.executable, '-c', 'assert True')
+        self.assertNotEqual(self.flow('review', 'graph', 'T01', 'accept').returncode, 0)
+        self.seal_delivery()
+        self.ok('review', 'graph', 'T01', 'accept')
+
+    def test_reverification_does_not_bypass_after_gate(self):
+        self.prepare_delivery()
+        self.seal_delivery()
+        self.ok('review', 'graph', 'T01', 'accept')
+        self.ok('verify', 'graph', '--task', 'T01', '--', sys.executable, '-c', 'assert True')
+        self.assertIn('待审阅', self.ok('status', 'graph'))
+        self.assertNotEqual(self.flow('review', 'graph', 'T01', 'accept').returncode, 0)
+        self.seal_delivery()
+        self.ok('review', 'graph', 'T01', 'accept')
+
+    def test_v2_accepted_dependency_can_start(self):
+        self.prepare_delivery()
+        self.task('graph', 'T02', after='T01')
+        self.confirm('graph', 'T02')
+        self.seal_delivery()
+        self.ok('review', 'graph', 'T01', 'accept')
+        self.ok('start', 'graph', 'T02')
+
+    def test_graphify_scope_blocks_outside_edits(self):
+        self.prepare_delivery()
+        (self.repo / 'outside.py').write_text('pass')
+        self.assertNotEqual(self.flow('verify', 'graph', '--', sys.executable, '-c', 'assert True').returncode, 0)
+        self.assertIn('阻塞', self.ok('status', 'graph'))
+        self.assertNotEqual(self.flow('graphify', 'graph', 'T01', '--phase', 'after').returncode, 0)
+
+    def test_ignored_read_only_evidence_cannot_change_during_implementation(self):
+        self.graph_task(mode='--graphify-audit')
+        (self.repo / '.gitignore').write_text('rules.md\n')
+        self.confirm('graph', 'T01')
+        self.ok('start', 'graph', 'T01')
+        (self.repo / 'rules.md').write_text('new business rule')
+        result = self.flow('verify', 'graph', '--', sys.executable, '-c', 'assert True')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('只读', result.stderr)
+
+    def test_pure_create_audit_needs_no_existing_code_input(self):
+        path = self.graph_task(mode='--graphify-audit')
+        path.write_text(path.read_text().replace('- MODIFY app.py', '- CREATE new.py'))
+        self.confirm('graph', 'T01')
+        self.ok('start', 'graph', 'T01')
+        (self.repo / 'new.py').write_text('def value():\n    return 2\n')
+        self.ok('verify', 'graph', '--', sys.executable, '-c', 'assert True')
+        self.ok('graphify', 'graph', 'T01', '--phase', 'after')
+        self.assertEqual(self.graph_record()['inputs'], ['new.py'])
+
+    def test_status_only_loads_current_task_graph_context(self):
+        self.graph_task()
+        self.graph_task(task='T02', after='T01')
+        self.ok('graphify', 'graph', 'T01')
+        self.ok('graphify', 'graph', 'T02')
+        status = self.ok('status', 'graph')
+        self.assertIn('Graphify：T01', status)
+        self.assertNotIn('Graphify：T02', status)
+
+    def record_rules(self, path, body):
+        text = path.read_text()
+        if '## 适用规范\n' not in text:
+            text = text.replace('\n## 工作流记录\n', '\n## 适用规范\n\n\n## 工作流记录\n')
+        path.write_text(text.replace('## 适用规范\n\n', f'## 适用规范\n\n{body}\n'))
+
+    def test_task_template_includes_applicable_rules(self):
+        from workflow import sections
+        self.init('rules')
+        path = self.task('rules', 'T01')
+        self.assertIn('适用规范', sections(path.read_text()))
+
+    def test_rule_references_are_audited_after_handoff(self):
+        self.init('rules', audited=True)
+        path = self.task('rules', 'T01')
+        body = ('- AIWorkflow:skills/swift-api-design-guidelines/SKILL.md — execute/verify；参数标签。\n'
+                '- 项目:AGENTS.md — execute/verify；沿用当前模块，不迁移旧目录。')
+        self.record_rules(path, body)
+        self.confirm('rules', 'T01')
+        self.ok('start', 'rules', 'T01')
+        self.ok('verify', 'rules', '--', sys.executable, '-c', 'assert True')
+        report = self.ok('audit', 'rules', 'T01')
+        self.assertIn(body, report)
+        self.assertIn(body, path.read_text())
+        self.ok('review', 'rules', 'T01', 'accept')
+
+    def test_changing_rule_selection_expires_confirmation(self):
+        self.init('rules')
+        path = self.task('rules', 'T01')
+        self.record_rules(path, '- AIWorkflow:skills/swift-api-design-guidelines/SKILL.md — Swift API。')
+        self.confirm('rules', 'T01')
+        path.write_text(path.read_text().replace('Swift API。', 'Swift API；项目例外需要调整。'))
+        result = self.flow('start', 'rules', 'T01')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('确认', result.stderr)
+
+    def test_external_coding_rules_are_not_graphify_inputs(self):
+        import json
+        path = self.graph_task(mode='--graphify-audit')
+        self.record_rules(path, f'- AIWorkflow:docs/structure/ios.md — 实际资源位于 {CLI.parent / "docs/structure/ios.md"}，用于文件归属。')
+        self.confirm('graph', 'T01')
+        records = [json.loads(line[2:]) for line in path.read_text().splitlines()
+                   if line.startswith('- {"kind": ')]
+        confirmation = next(r for r in reversed(records) if r['kind'] == 'confirmation')
+        self.assertEqual(set(confirmation['sources']), {'app.py', 'rules.md'})
+        self.assertEqual(confirmation['scope']['graphify_input'], [])
+        self.ok('start', 'graph', 'T01')
+
+    def test_old_task_without_rule_section_still_completes(self):
+        self.init('legacy-rules', audited=True)
+        path = self.task('legacy-rules', 'T01')
+        path.write_text(path.read_text().replace('## 适用规范\n\n\n', ''))
+        self.confirm('legacy-rules', 'T01')
+        self.ok('start', 'legacy-rules', 'T01')
+        self.ok('verify', 'legacy-rules', '--', sys.executable, '-c', 'assert True')
+        self.ok('review', 'legacy-rules', 'T01', 'accept')
+
     def test_approval_and_sequential_verification(self):
         self.init("payment", goal="支付重试")
         first = self.task("payment", "T01")

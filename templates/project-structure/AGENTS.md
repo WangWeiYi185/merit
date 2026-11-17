@@ -1,4 +1,4 @@
 # 项目指引
 
-- 新建、移动、重命名文件或输出文件树时，从 [目录规范索引](docs/project-structure.md) 读取对应技术栈的文档。
-- 规划或执行存量路径迁移时，读取 [存量路径迁移手册](docs/path-migration.md) 的对应阶段。
+- 通过 AIWorkflow 处理编码/API、文件归属或审查任务时，读取 `AIWorkflow:docs/coding-rules.md`，由主 Skill 按需加载适用的目录及语言规范。
+- `AIWorkflow:` 从实际加载的 `skills/ai-workflow/SKILL.md` 真实路径所在目录向上两级解析，不是本业务仓库路径；无需复制通用规范。项目自己的明确约定优先，任务内记录适用规范及例外。

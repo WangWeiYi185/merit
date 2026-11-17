@@ -24,7 +24,7 @@ pi --skill /path/to/AIWorkflow/skills/ai-workflow/SKILL.md \
 
 进入 Pi 后用 `/skill:ai-workflow <需求描述>` 启动。AIWorkflow 读取已安装的 Superpowers `brainstorming` 和 `writing-plans`，把结果接入本地示例和任务文件。其他 Agent 可加载同一份 [工作流指令](skills/ai-workflow/SKILL.md) 及对应的上游技能。Example Mapping 使用 Markdown，无需安装 Cucumber 测试运行器。
 
-语言编码规范可按需单独加载：[Swift API 设计指南](skills/swift-api-design-guidelines/SKILL.md) 和 [Objective-C Cocoa 编码与 API 约定](skills/objective-c-cocoa-guidelines/SKILL.md)。它们补充语言层面的 API 设计与编码建议，不替代业务仓库自身的 `AGENTS.md` 和项目约定。
+进入 AIWorkflow 的编码任务会按 [通用规则加载索引](docs/coding-rules.md)，由 Agent 选择并读取目录规范、Swift 或 Objective-C 规范。资源从实际 AIWorkflow 安装位置定位，无需单独安装每个 Skill、复制规范到业务仓库或写死本机路径。只加载当前任务/阶段适用的规则，任务「适用规范」记录引用和项目例外，续接及审查沿用；业务仓库明确约定、兼容性和构建要求优先。这是 Skill 指令驱动读取，不是 CLI 或 Pi 强制注入；未进入 AIWorkflow 的任务不保证自动加载。
 
 实现代码时，AIWorkflow 会按任务读取 [Ponytail 编码规则](skills/ai-workflow/references/ponytail/SKILL.md)，用它约束实现规模和代码复用，并在对应任务记录 Skill 使用。模板与 [MIT 许可](skills/ai-workflow/references/ponytail/LICENSE) 随仓库保存。[上游固定版本](https://github.com/DietrichGebert/ponytail/blob/96608e078b2d5ea607c5c3b8b5a54d1c1fba6846/skills/ponytail/SKILL.md)
 
@@ -32,7 +32,7 @@ pi --skill /path/to/AIWorkflow/skills/ai-workflow/SKILL.md \
 
 1. Agent 只读调查源码、业务规则和测试。按 [Example Mapping](https://cucumber.io/docs/bdd/example-mapping/) 填写故事、规则、示例和未决问题，再用 Superpowers 确认设计、拆分任务。空任务模板会在确认时提示缺失字段。
 
-需要追踪源码调用链、模块依赖、共享契约或代码驱动流程的任务，用 `flow add ... --graphify-context` 启用任务级 Graphify 上下文。任务文件须列出精确 `EDITABLE`、`GRAPHIFY_INPUT` 和 `READ_ONLY_EVIDENCE` 路径；补齐源码依赖证据、业务流程变化和编码边界后运行 `flow graphify <需求ID> T01`。工具仅镜像列明的源码，确认时绑定范围与图的指纹，开工前检查新鲜度，验收时阻止越界改动。纯文档等不调查源码的任务不需要启用。详细格式和限制见 [AIWorkflow Skill](skills/ai-workflow/SKILL.md)。
+Graphify 按任务用途启用：修改既有代码需关系上下文时用 `add --graphify-context`（before + after）；只需交付拓扑/调用流程审计时用 `add --graphify-audit`（仅 after）；其他任务不加载。每次只镜像任务精确路径，前后图及生成批次互不覆盖。确认绑定修改范围；交付后图、流程 HTML 和源码核验报告绑定本次验证，封存后才能接受。详见 [单任务 Graphify 操作与边界](docs/graphify-task-lifecycle.md)。
 2. 负责人用具体表述确认**当前行为、这次改动、应保留行为和验收方法**。如果已在聊天里确认，Agent 可以原样记录。
 3. 启动一项，实施后核对实际差异并运行这一项的验证。验收应覆盖目标行为及相关旧行为。
 4. 新需求验证通过后进入待审阅，负责人接受后才可以开始依赖任务。遇到缺口先记录，等能解决的人补齐。交付后按需清理本次需求目录。
@@ -46,6 +46,8 @@ flow audit payment-retry T01 --diff
 flow review payment-retry T01 accept
 flow status payment-retry
 ```
+
+带 Graphify 的新任务在 `verify` 成功后、`review accept` 前，还需运行 `flow graphify <需求ID> T01 --phase after`，按源码与测试补齐输出的审计报告，再以同命令加 `--seal` 封存。图不是完整业务控制流证明，负责人仍需审阅。旧任务不自动增加门槛。
 
 验证命令请替换为项目实际入口。若命令需要生成文件，将它们输出到项目已忽略的位置。CLI 记录命令、退出码、日志及对应工作区标识。验证期间若跟踪或未忽略的文件发生变化，任务保持执行中。标识用于比对状态，要保留可恢复的代码版本时，可在验证前按项目约定保存本地提交。验证命令是否真正覆盖业务验收由负责人和 Agent 核对。工作区状态和前置验证不同时，启动会提示核对。若前置任务的相关输入有变，在没有执行中任务时用 `flow verify <需求ID> --task T01 -- <命令>` 复验。复验失败会将该任务退回待执行。
 
@@ -77,7 +79,7 @@ flow resolve payment-retry T01 --detail "已有支付测试能观察扣款调用
 
 - 开工前声明 Skill 及用途。例如 `flow skill payment-retry brainstorming --stage clarify --purpose "澄清重试行为"`。阶段可选 `clarify`、`plan`、`execute`、`verify`。单任务记录用 `--task T01`，可用 `--evidence` 链接产物。
 - 加载上面的 Pi 扩展时，Agent 会设置当前需求、阶段和任务。扩展记录在该上下文中 **Pi 观察到的** Skill 命令展开及原生读取工具对已注册 Skill 文件的成功读操作。其他方式加载、扩展未运行或未绑定上下文时，仍使用声明记录。观察只代表调用或读到文件，业务执行效果靠实际产出与验证判断。这些是可编辑的本地记录，来源标签用于区分记录途径。
-- `flow audit payment-retry T01` 给出本项允许范围、实际改动、验证结果及 Skill 记录。加 `--diff` 查看本地 Git 差异。差异从任务首次开工时的工作区生成，涵盖跟踪和未忽略文件。已有未提交的内容作为基线保存，不会修改业务仓库的 Git 索引。Git 规范化后没有出现在 diff 中的文件改动会单独提示。提交人核对变更是否符合范围。
+- `flow audit payment-retry T01` 给出本项适用规范、允许范围、实际改动、验证结果及 Skill 记录。通用规则引用不进入 Graphify 的业务仓库输入范围；规则选择变化会使任务正文确认失效，规则文件正文不做自动版本锁定。加 `--diff` 查看本地 Git 差异。差异从任务首次开工时的工作区生成，涵盖跟踪和未忽略文件。已有未提交的内容作为基线保存，不会修改业务仓库的 Git 索引。Git 规范化后没有出现在 diff 中的文件改动会单独提示。提交人核对变更是否符合范围。
 - `flow review payment-retry T01 rework --note "原因"` 记录返工。首次审阅结论固定计入 `flow audit payment-retry` 的唯一统计，首次接受的任务数 ÷ 已审阅任务数。返工后再次接受不会改变首审结果。工作区与本次证据不一致时，重新验证再审阅。
 - 已经开工且没有审计基线的旧任务沿用原流程。新需求默认带审计，可在交付后清理本地证据。
 
