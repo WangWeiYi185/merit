@@ -14,12 +14,14 @@ import sys
 import tempfile
 
 import task_audit
+import task_graphify
 
 
 STATE_DIR = ".ai-workflow"
 PENDING, ACTIVE, BLOCKED, REVIEW, PASSED = "待执行", "执行中", "阻塞", "待审阅", "通过"
 KINDS = {"decision": "需要人决定", "evidence": "Agent 待取证", "external": "缺外部条件"}
 HEADINGS = ("现状与依据", "目标与示例", "实现设计", "最低交付", "最大范围", "保留行为与暂停条件", "验收方案")
+GRAPHIFY_HEADINGS = ("修改范围", "Graphify 与只读证据范围", "Graphify 依赖证据", "流程变化与确定编码上下文")
 RECORDS = "\n## 工作流记录\n"
 MAP_LINK = "澄清与验收示例见 [Example Mapping](examples.md)。"
 TASK_ID = r"T[0-9]{2,}"
@@ -126,7 +128,7 @@ class Requirement:
                     raise WorkflowError(f"清单包含重复任务：{task}")
                 self.tasks[task] = (position, title.strip(), after.strip(), state)
 
-    def add(self, task, title, after, examples, investigation):
+    def add(self, task, title, after, examples, investigation, graphify_context=False):
         mapping = self.example_mapping()
         if mapping and not (examples or investigation):
             raise WorkflowError("请用 --example 引用已整理的业务示例，或用 --investigation 创建调查任务")
@@ -138,8 +140,11 @@ class Requirement:
             raise WorkflowError(f"任务已存在：{task}")
         if set(after) - self.tasks.keys():
             raise WorkflowError("前置任务必须已经在清单中")
+        extra = "".join(f"## {heading}\n\n\n" for heading in GRAPHIFY_HEADINGS) if graphify_context else ""
         write(self.task_path(task), f"# {task} {title}\n\n" + example_section +
-              "".join(f"## {heading}\n\n\n" for heading in HEADINGS) + RECORDS)
+              "".join(f"## {heading}\n\n\n" for heading in HEADINGS) + extra + RECORDS)
+        if graphify_context:
+            self.record(task, "context_policy", mode="graphify-task-scope", version=1)
         self.lines.append(f"| [{task}](tasks/{task}.md) | {title} | {', '.join(after) or '—'} | {PENDING} |")
         self.save()
 
@@ -190,15 +195,31 @@ class Requirement:
                 return record
         return {}
 
-    def confirm(self, task, statement):
+    def graphify_enabled(self, task):
+        return self.latest(task, "context_policy").get("mode") == "graphify-task-scope"
+
+    def graphify_record(self, task):
+        return self.latest(task, "graphify_context")
+
+    def confirm(self, task, statement, root):
         state = self.state(task)
         if state in (ACTIVE, REVIEW):
             raise WorkflowError("执行中或待审阅任务请先暂停，再重新确认")
         plan, _ = self.plan(task)
         values = sections(plan)
         missing = [heading for heading in HEADINGS if not values.get(heading, "").strip()]
+        if self.graphify_enabled(task):
+            missing += [heading for heading in GRAPHIFY_HEADINGS if not values.get(heading, "").strip()]
         if missing:
             raise WorkflowError("先补齐任务内容：" + "、".join(missing))
+        context = None
+        if self.graphify_enabled(task):
+            context = self.graphify_record(task)
+            if not context:
+                raise WorkflowError("请先运行 graphify 准备任务范围上下文")
+            task_graphify.validate_current(root, self.path, context, plan)
+            if not values.get("Graphify 依赖证据", "").strip() or not values.get("流程变化与确定编码上下文", "").strip():
+                raise WorkflowError("请在任务文件中写明 Graphify 源码证据和业务流程变化")
         if state == BLOCKED and self.latest(task, "block").get("category") != "decision":
             raise WorkflowError("请先用 resolve 记录取证或外部条件的解决结果")
         digest = self.approval_digest(plan)
@@ -206,14 +227,23 @@ class Requirement:
             raise WorkflowError("任务已通过；如需重跑验证，请用 verify --task")
         if state == PASSED:
             self.set_state(task, PENDING)
-        self.record(task, "confirmation", plan_sha256=digest, statement=statement)
+        self.record(task, "confirmation", plan_sha256=digest, statement=statement,
+                    graphify_manifest_sha256=context.get("manifest_sha256") if context else None,
+                    graphify_graph_sha256=context.get("graph_sha256") if context else None)
         if state == BLOCKED:
             self.set_state(task, PENDING)
 
-    def approved(self, task):
+    def approved(self, task, root, check_sources=True):
         plan, _ = self.plan(task)
         if self.latest(task, "confirmation").get("plan_sha256") != self.approval_digest(plan):
             raise WorkflowError("当前任务内容需由负责人确认后才能继续")
+        if self.graphify_enabled(task):
+            context = self.graphify_record(task)
+            confirmation = self.latest(task, "confirmation")
+            if not context or confirmation.get("graphify_manifest_sha256") != context.get("manifest_sha256"):
+                raise WorkflowError("Graphify 上下文未包含在当前确认中，请重新确认")
+            if check_sources:
+                task_graphify.validate_current(root, self.path, context, plan)
 
 
     def dependencies(self, task):
@@ -223,7 +253,7 @@ class Requirement:
             if self.state(dep) != PASSED:
                 raise WorkflowError(f"前置任务 {dep} 尚未通过")
             try:
-                self.approved(dep)
+                self.approved(dep, Path(git(None, "rev-parse", "--show-toplevel").decode().strip()))
             except WorkflowError as error:
                 raise WorkflowError(f"前置任务 {dep} 的确认失效，请重新确认和验证：{error}") from error
         return dependencies
@@ -318,7 +348,7 @@ def init_requirement(path, goal):
 
 
 def verify(root, requirement, task, command):
-    requirement.approved(task)
+    requirement.approved(task, root, check_sources=False)
     requirement.dependencies(task)
     before = snapshot(root)
     with tempfile.NamedTemporaryFile(dir=requirement.path, prefix=f"{task}-", suffix=".log", delete=False) as log:
@@ -331,7 +361,7 @@ def verify(root, requirement, task, command):
             code = 127
     manifest = {}
     after = snapshot(root, manifest)
-    requirement.approved(task)
+    requirement.approved(task, root, check_sources=False)
     requirement.dependencies(task)
     passed = code == 0 and before == after
     receipt = {}
@@ -346,9 +376,16 @@ def verify(root, requirement, task, command):
         raw_files = {name for name in original.keys() | manifest.keys() if original.get(name) != manifest.get(name)}
         receipt = {"patch": patch, "patch_sha256": patch_digest,
                    "files": sorted(raw_files | set(files)), "without_patch": sorted(raw_files - set(files))}
+        if requirement.graphify_enabled(task):
+            receipt["scope_violations"] = task_graphify.changed_paths(
+                original, manifest, requirement.graphify_record(task)["scope"]["editable"])
     requirement.record(task, "verification", result="passed" if passed else "failed", command=command,
                        exit_code=code, checkpoint=after, log=log_path.name,
                        source_changed=before != after, **receipt)
+    if receipt.get("scope_violations"):
+        requirement.record(task, "scope_violation", paths=receipt["scope_violations"])
+        requirement.set_state(task, BLOCKED)
+        raise WorkflowError("交付包含已确认范围之外的改动，任务已阻塞：" + "、".join(receipt["scope_violations"]))
     if not passed:
         if requirement.state(task) == PASSED:
             requirement.set_state(task, PENDING)
@@ -370,7 +407,7 @@ def review(root, requirement, task, decision, note):
     task_audit.review_patch(requirement.audit_directory, verification)
     if verification.get("checkpoint") != snapshot(root):
         raise WorkflowError("工作区与审阅材料不一致，请重新验证")
-    requirement.approved(task)
+    requirement.approved(task, root, check_sources=False)
     requirement.dependencies(task)
     new_state = PASSED if decision == "accept" else ACTIVE
     if prior.get("patch") == patch:
@@ -406,6 +443,15 @@ def audit_report(requirement, task, show_diff):
         scope = sections(plan).get("最大范围", "").strip()
         latest = requirement.latest(task, "verification")
         print(f"允许范围：{scope}")
+        if requirement.graphify_enabled(task):
+            context = requirement.graphify_record(task)
+            print("EDITABLE：" + ", ".join(f"{action} {name}" for name, action in context["scope"]["editable"].items()))
+            print("GRAPHIFY_INPUT：" + ", ".join(context["scope"]["graphify_input"]))
+            print("READ_ONLY_EVIDENCE：" + ", ".join(context["scope"]["read_only_evidence"]))
+            print(f"Graphify 图：{requirement.path / context['graph']} · SHA-256 {context['graph_sha256']}")
+            print("流程变化与编码上下文：" + sections(plan).get("流程变化与确定编码上下文", "").strip())
+            if violations := requirement.latest(task, "scope_violation").get("paths"):
+                print("范围违规：" + ", ".join(violations))
         if latest:
             files = "、".join(latest.get("files", [])) or "无"
             print(f"本次改动：{files}")
@@ -465,16 +511,23 @@ def run(args, command):
             return
         requirement = Requirement(path)
         if args.action == "add":
-            requirement.add(args.task, args.title, args.after, args.example, args.investigation)
+            requirement.add(args.task, args.title, args.after, args.example, args.investigation, args.graphify_context)
             print(requirement.task_path(args.task))
+        elif args.action == "graphify":
+            plan, _ = requirement.plan(args.task)
+            if not requirement.graphify_enabled(args.task):
+                raise WorkflowError("该任务未启用 --graphify-context")
+            record = task_graphify.prepare(root, requirement.path, args.task, plan)
+            requirement.record(args.task, "graphify_context", **record)
+            print(f"Graphify 上下文已生成：{requirement.path / record['graph']}")
         elif args.action == "status":
             display(root, requirement)
         elif args.action == "confirm":
-            requirement.confirm(args.task, args.statement)
+            requirement.confirm(args.task, args.statement, root)
         elif args.action == "start":
             if requirement.state(args.task) != PENDING:
                 raise WorkflowError("仅待执行任务可以开工")
-            requirement.approved(args.task)
+            requirement.approved(args.task, root)
             dependencies = requirement.dependencies(args.task)
             ensure_idle(directory)
             manifest = {}
@@ -549,10 +602,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     task_id = identifier(TASK_ID)
-    for action in ("init", "add", "status", "confirm", "start", "block", "resolve", "verify", "audit", "review", "skill", "_observe-skill"):
+    for action in ("init", "add", "status", "confirm", "start", "block", "resolve", "verify", "audit", "review", "skill", "_observe-skill", "graphify"):
         item = sub.add_parser(action)
         item.add_argument("requirement", type=identifier(r"[a-zA-Z0-9][a-zA-Z0-9_-]*"))
-        if action in ("add", "confirm", "start", "resolve", "review"):
+        if action in ("add", "confirm", "start", "resolve", "review", "graphify"):
             item.add_argument("task", type=task_id)
         if action == "init":
             item.add_argument("--goal", required=True, type=one_line)
@@ -562,6 +615,7 @@ def main():
             reference = item.add_mutually_exclusive_group()
             reference.add_argument("--example", action="append", type=identifier(EXAMPLE_ID), default=[])
             reference.add_argument("--investigation", action="store_true")
+            item.add_argument("--graphify-context", action="store_true", help="为源码任务启用任务范围 Graphify 上下文")
         elif action == "confirm":
             item.add_argument("--statement", required=True, type=one_line)
         elif action == "resolve":

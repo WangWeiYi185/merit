@@ -31,6 +31,8 @@ pi --skill /path/to/AIWorkflow/skills/ai-workflow/SKILL.md \
 ## 从需求到交付
 
 1. Agent 只读调查源码、业务规则和测试。按 [Example Mapping](https://cucumber.io/docs/bdd/example-mapping/) 填写故事、规则、示例和未决问题，再用 Superpowers 确认设计、拆分任务。空任务模板会在确认时提示缺失字段。
+
+需要追踪源码调用链、模块依赖、共享契约或代码驱动流程的任务，用 `flow add ... --graphify-context` 启用任务级 Graphify 上下文。任务文件须列出精确 `EDITABLE`、`GRAPHIFY_INPUT` 和 `READ_ONLY_EVIDENCE` 路径；补齐源码依赖证据、业务流程变化和编码边界后运行 `flow graphify <需求ID> T01`。工具仅镜像列明的源码，确认时绑定范围与图的指纹，开工前检查新鲜度，验收时阻止越界改动。纯文档等不调查源码的任务不需要启用。详细格式和限制见 [AIWorkflow Skill](skills/ai-workflow/SKILL.md)。
 2. 负责人用具体表述确认**当前行为、这次改动、应保留行为和验收方法**。如果已在聊天里确认，Agent 可以原样记录。
 3. 启动一项，实施后核对实际差异并运行这一项的验证。验收应覆盖目标行为及相关旧行为。
 4. 新需求验证通过后进入待审阅，负责人接受后才可以开始依赖任务。遇到缺口先记录，等能解决的人补齐。交付后按需清理本次需求目录。
