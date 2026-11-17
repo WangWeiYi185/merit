@@ -1,6 +1,6 @@
 # Android · Kotlin / Compose 目录规范
 
-示例在单个 Gradle 模块内按业务分包。UI 和数据层各有职责，复杂或复用的用例可以单设 `domain/`。[Android 应用架构指南](https://developer.android.com/topic/architecture)
+下面的树是分类案例，其中的 `shop`、`checkout` 不作为新建目录。示例在单个 Gradle 模块内按业务分包。UI 和数据层各有职责，复杂或复用的用例可以单设 `domain/`。[Android 应用架构指南](https://developer.android.com/topic/architecture)
 
 ```text
 android/app/src/

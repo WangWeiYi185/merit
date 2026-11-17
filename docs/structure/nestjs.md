@@ -1,6 +1,6 @@
 # Node.js / NestJS 目录规范
 
-每个业务模块声明自身依赖，并通过模块导出可供其他模块使用的服务。[NestJS 模块指南](https://docs.nestjs.com/modules)
+下面的树是分类案例，其中的 `order` 不作为新建目录。每个业务模块声明自身依赖，并通过模块导出可供其他模块使用的服务。[NestJS 模块指南](https://docs.nestjs.com/modules)
 
 ```text
 server/

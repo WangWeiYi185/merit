@@ -9,7 +9,7 @@ description: Use when a user asks to plan or execute a bounded migration of exis
 
 ## 按需读取
 
-- 读取仓库适用的 `AGENTS.md`，再读取仓库指定的结构规范。采用本工具包时，从 `docs/project-structure.md` 选择本批技术栈的独立文档，已知具体路径时直接读取。目标路径以结构规范、项目例外和实际构建配置为依据。规范缺失或无法确定目标时，将文件记入待判断项。
+- 读取仓库适用的 `AGENTS.md`，再读取仓库指定的结构规范。采用本工具包时，从 `docs/project-structure.md` 选择本批技术栈的独立文档，已知具体路径时直接读取，并读取 `docs/structure/common.md`。目标路径以职责划分、项目例外和实际构建配置为依据。结构文档里的 `shop`、`order`、`checkout` 只是分类案例，业务目录使用仓库已有名称，不创建案例目录。规范缺失或无法确定目标时，将文件记入待判断项。
 - 仅在涉及 Xcode 工程或资源时，读取 [Xcode 检查项](references/ios.md)。
 - 需要创建或理解交接清单时，使用 [清单模板](assets/migration-plan.json) 及 [字段说明](references/migration-plan.md)。
 

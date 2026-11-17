@@ -1,5 +1,7 @@
 # Web / H5 目录规范
 
+两棵目录树都是分类案例，其中的 `checkout`、`order`、`order-summary`、`apply-coupon` 不作为新建目录。
+
 ## 传统分层
 
 适用于以页面和几个主要业务为主的项目。Vue 可统一将 `hooks/` 命名为 `composables/`。路由入口服从实际框架约定。

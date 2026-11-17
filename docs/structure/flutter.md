@@ -1,6 +1,6 @@
 # Flutter 目录规范
 
-示例以业务优先组织 Dart 文件。模块内区分界面与数据访问，领域用例按需放入 `domain/`。各端宿主工程放在项目根目录的对应平台目录，Dart 代码集中在 `lib/`。[Flutter 架构建议](https://docs.flutter.dev/app-architecture/recommendations) · [Dart 命名规范](https://dart.dev/effective-dart/style)
+下面的树是分类案例，其中的 `checkout` 不作为新建目录。示例以业务优先组织 Dart 文件。模块内区分界面与数据访问，领域用例按需放入 `domain/`。各端宿主工程放在项目根目录的对应平台目录，Dart 代码集中在 `lib/`。[Flutter 架构建议](https://docs.flutter.dev/app-architecture/recommendations) · [Dart 命名规范](https://dart.dev/effective-dart/style)
 
 ```text
 flutter_app/
