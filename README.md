@@ -28,6 +28,50 @@ pi --skill /path/to/AIWorkflow/skills/ai-workflow/SKILL.md \
 
 实现代码时，AIWorkflow 会按任务读取 [Ponytail 编码规则](skills/ai-workflow/references/ponytail/SKILL.md)，用它约束实现规模和代码复用，并在对应任务记录 Skill 使用。模板与 [MIT 许可](skills/ai-workflow/references/ponytail/LICENSE) 随仓库保存。[上游固定版本](https://github.com/DietrichGebert/ponytail/blob/96608e078b2d5ea607c5c3b8b5a54d1c1fba6846/skills/ponytail/SKILL.md)
 
+## 任务看板与逐项深审
+
+在Pi中用 `/workflow [需求ID] [T01]` 打开看板：查看任务/衍生拓扑、节点输入、Skills/Rules、输出，再按需展开原始证据。默认折叠工具内部过程；真实观察、Agent声明和缺失证据明确区分，不把Skill读取包装成独立Agent审查。命令与证据均保留在本地，不新增运行依赖。
+
+CLI读取相同投影：
+
+```sh
+flow board                       # 需求概览
+flow board component-clustering T01
+flow board component-clustering T01 --json
+flow evidence component-clustering <看板中的证据标识>
+```
+
+节点原文按执行时快照留存，规则或源码后续变化不覆盖旧输入；当前草案只能证明当前版本。详细工具结果、验证日志、差异仍可深审，但不要求用户日常阅读过程文件。已完成任务不自动删除证据。已知凭据字段和敏感文件内容会脱敏；这不是通用DLP，不应主动把真实密钥作为审计输入。
+
+`ai_workflow_audit_context`可绑定task/stage及可选node/parent；`ai_workflow_record`声明核心输入、委派或输出。扩展记录实际Agent运行、工具结果、成功Skill读取及Pi已加载的上下文规则。声明仍是声明；无法观察的子Agent内部不补造。记录失败会显示审计不完整并在Pi会话中保留缺口定位。
+
+### 派生需求与上层召回
+
+澄清补充留在当前需求；同一目标的步骤拆task；只有新独立交付需单独规划/验收且上下文有界时才派生。先在父需求建立真实的进度收敛task，再创建：
+
+```sh
+flow derive architecture-audit T07 component-clustering \
+  --goal "原样聚类组件" --reason "从只读审计派生可独立验收的目录交付" \
+  --scope "已确认组件清单" --deliverable "目录和有效工程引用" \
+  --acceptance "内容一致、构建与调用方回归" --statement "负责人实际确认原话"
+# 关联已存在的需求，不重复创建或假造原始历史：
+flow link component-clustering architecture-audit T07 \
+  --reason "补充遗漏的上层来源" --statement "负责人实际确认原话"
+```
+
+子需求`superiors`只保存同一Git工作区内的上层需求、task和读取入口。拓扑不等于after依赖，不同步父子上下文/状态。只有关联子需求全部任务正式接受且当前确认仍有效，才输出返回上层task的入口；内部一个task验证或接受不等于整个子需求结束。重复接受不重复召回，父入口失效不回滚子接受，也不自动把父任务标完成。
+
+### 不让静态成功掩盖构建失败
+
+在任务验收方案中明确所有必须检查的项目，执行时使用稳定名称：
+
+```sh
+flow verify component-clustering --check build -- <构建命令>
+flow verify component-clustering --check static -- <静态校验命令>
+```
+
+已命名的build失败在同名重跑成功前仍阻止接受，static成功不能覆盖它；代码变化后，旧检查点的成功也须重跑，不能拼凑不同版本的验收。看板的checks.current表示与最近验证检查点一致，实际工作区是否仍一致由review在接受前重新核对。检查名称只覆盖已登记的执行项，不能代替负责人对完整验收方案的核对。旧未命名命令兼容执行，看板对其他命令的历史失败显示限制。
+
 ## 从需求到交付
 
 1. Agent 只读调查源码、业务规则和测试。按 [Example Mapping](https://cucumber.io/docs/bdd/example-mapping/) 填写故事、规则、示例和未决问题，再用 Superpowers 确认设计、拆分任务。空任务模板会在确认时提示缺失字段。
@@ -81,7 +125,7 @@ flow resolve payment-retry T01 --detail "已有支付测试能观察扣款调用
 - 加载上面的 Pi 扩展时，Agent 会设置当前需求、阶段和任务。扩展记录在该上下文中 **Pi 观察到的** Skill 命令展开及原生读取工具对已注册 Skill 文件的成功读操作。其他方式加载、扩展未运行或未绑定上下文时，仍使用声明记录。观察只代表调用或读到文件，业务执行效果靠实际产出与验证判断。这些是可编辑的本地记录，来源标签用于区分记录途径。
 - `flow audit payment-retry T01` 给出本项适用规范、允许范围、实际改动、验证结果及 Skill 记录。通用规则引用不进入 Graphify 的业务仓库输入范围；规则选择变化会使任务正文确认失效，规则文件正文不做自动版本锁定。加 `--diff` 查看本地 Git 差异。差异从任务首次开工时的工作区生成，涵盖跟踪和未忽略文件。已有未提交的内容作为基线保存，不会修改业务仓库的 Git 索引。Git 规范化后没有出现在 diff 中的文件改动会单独提示。提交人核对变更是否符合范围。
 - `flow review payment-retry T01 rework --note "原因"` 记录返工。首次审阅结论固定计入 `flow audit payment-retry` 的唯一统计，首次接受的任务数 ÷ 已审阅任务数。返工后再次接受不会改变首审结果。工作区与本次证据不一致时，重新验证再审阅。
-- 已经开工且没有审计基线的旧任务沿用原流程。新需求默认带审计，可在交付后清理本地证据。
+- 已经开工且没有审计基线的旧任务沿用原流程。新需求默认带审计，交付后保留本地证据供恢复与深审，不自动清理。
 
 ## 本地状态和控制边界
 
@@ -100,4 +144,9 @@ flow resolve payment-retry T01 --detail "已有支付测试能观察扣款调用
 
 ```sh
 python3 -B -m unittest discover -s tests -v
+# Pi扩展集成测试；路径指向本机实际安装的Pi包，不安装额外依赖：
+PI_CODING_AGENT_DIR=/path/to/@earendil-works/pi-coding-agent \
+  node --experimental-strip-types --test tests/extension-audit.test.mjs
 ```
+
+Python测试覆盖真实临时Git仓中的派生、关联、接受与召回、证据留存/脱敏/篡改、看板及旧流程兼容。扩展测试使用安装的Pi依赖、实际Python后端与可控事件/UI边界，验证并行归属、规则快照、声明/观察区分和只读证据视图；不是人工交互或真实子Agent端到端验收。Node需支持TypeScript类型擦除，未提供Pi路径时会明确skip扩展测试。

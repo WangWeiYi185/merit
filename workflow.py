@@ -15,6 +15,8 @@ import tempfile
 
 import task_audit
 import task_graphify
+import task_topology
+import audit_view
 
 
 STATE_DIR = ".ai-workflow"
@@ -116,6 +118,8 @@ class Requirement:
     def __init__(self, path):
         self.path = path
         self.index = path / "tasks.md"
+        if path.is_symlink() or self.index.is_symlink():
+            raise WorkflowError('需求入口不能是符号链接')
         if not self.index.is_file():
             raise WorkflowError(f"需求不存在：{path.name}")
         self.lines = read(self.index).splitlines()
@@ -152,7 +156,10 @@ class Requirement:
                         before=graphify_context, after=True)
 
     def task_path(self, task):
-        return self.path / "tasks" / f"{task}.md"
+        path = self.path / "tasks" / f"{task}.md"
+        if path.parent.is_symlink() or path.is_symlink():
+            raise WorkflowError('任务入口不能是符号链接')
+        return path
 
     def save(self):
         write(self.index, "\n".join(self.lines) + "\n")
@@ -189,8 +196,28 @@ class Requirement:
 
     def record(self, task_id, kind, **fields):
         plan, records = self.plan(task_id)
-        payload = json.dumps({"kind": kind, **fields}, ensure_ascii=False)
+        payload = json.dumps(task_audit.redact({"kind": kind, **fields}), ensure_ascii=False)
         write(self.task_path(task_id), plan + RECORDS + records.rstrip() + "\n- " + payload + "\n")
+        if self.audit_directory.is_dir():
+            stage = 'verify' if kind in ('verification', 'review') else 'execute' if kind in ('start', 'block', 'resolution') else 'plan'
+            detail = {'record': {'kind': kind, **fields}}
+            if kind in ('confirmation', 'start'):
+                detail['task_brief'] = plan
+            if kind == 'verification' and fields.get('log'):
+                log = self.path / fields['log']
+                if log.name == fields['log'] and log.is_file() and not log.is_symlink():
+                    raw = log.read_bytes()
+                    try:
+                        detail['output'] = raw.decode('utf-8')
+                        detail['output_encoding'] = 'utf-8'
+                    except UnicodeDecodeError:
+                        detail['output'] = raw.decode('utf-8', errors='replace')
+                        detail['output_encoding'] = 'utf-8 with replacement; raw bytes retained in original log'
+            task_audit.store_event(self.audit_directory, kind='verification' if kind == 'verification' else 'lifecycle',
+                                   name=kind, stage=stage, task=task_id, source='workflow',
+                                   node=f'{task_id}/{stage}', summary=str(fields.get('result') or fields.get('decision') or kind),
+                                   detail=detail,
+                                   reference=task_audit.record_reference(task_id, len(self.records(task_id)) - 1, json.loads(payload)))
 
     def latest(self, task, kind):
         for record in reversed(self.records(task)):
@@ -397,7 +424,7 @@ def init_requirement(path, goal):
           "| 任务 | 可观察结果 | 前置任务 | 状态 |\n| --- | --- | --- | --- |\n")
 
 
-def verify(root, requirement, task, command):
+def verify(root, requirement, task, command, check=None):
     requirement.approved(task, root, check_sources=False)
     requirement.unchanged_evidence(task, root)
     requirement.dependencies(task)
@@ -432,7 +459,7 @@ def verify(root, requirement, task, command):
         if requirement.graphify_enabled(task):
             receipt["scope_violations"] = task_graphify.changed_paths(
                 original, manifest, requirement.confirmed_scope(task)["editable"])
-    requirement.record(task, "verification", result="passed" if passed else "failed", command=command,
+    requirement.record(task, "verification", result="passed" if passed else "failed", command=command, check=check,
                        exit_code=code, checkpoint=after, log=log_path.name,
                        source_changed=before != after, **receipt)
     if receipt.get("scope_violations"):
@@ -446,11 +473,16 @@ def verify(root, requirement, task, command):
             requirement.set_state(task, ACTIVE)
         raise WorkflowError("验证期间代码状态发生变化，未能形成检查点" if before != after
                             else f"验证失败（退出码 {code}），{task} 未通过")
+    if check and (remaining := audit_view.failed_checks(requirement, task)):
+        requirement.set_state(task, ACTIVE)
+        raise WorkflowError('本项通过，但仍有未通过检查：' + '、'.join(remaining))
     requirement.set_state(task, REVIEW if audited_delivery else PASSED)
     print(f"{task} 验证通过。" + ("待负责人审阅。" if audited_delivery else "") + f"检查点：{after}")
 
 
 def review(root, requirement, task, decision, note):
+    if decision == 'accept' and (remaining := audit_view.failed_checks(requirement, task)):
+        raise WorkflowError('接受前仍有未通过检查：' + '、'.join(remaining))
     state = requirement.state(task)
     verification = requirement.latest(task, "verification")
     patch = verification.get("patch")
@@ -475,6 +507,13 @@ def review(root, requirement, task, decision, note):
                            checkpoint=verification["checkpoint"])
     requirement.set_state(task, new_state)
     print("已接受" if decision == "accept" else "已记录返工，任务继续执行")
+    if decision == 'accept':
+        try:
+            for target in task_topology.recall(requirement):
+                print(f"返回上层：{target['requirement']}/{target['task']} · "
+                      + (target['entry'] if target['available'] else target['warning']))
+        except (WorkflowError, task_audit.AuditError, OSError, ValueError) as error:
+            print(f'子任务已接受，但召回不可用：{error}', file=sys.stderr)
 
 
 def graphify_status(root, requirement, task):
@@ -596,14 +635,63 @@ def ensure_idle(directory):
 def run(args, command):
     root = Path(git(None, "rev-parse", "--show-toplevel").decode().strip())
     directory = root / STATE_DIR
-    path = directory / args.requirement
+    if args.action == 'board' and not args.requirement:
+        summaries = []
+        if directory.exists():
+            for index in sorted(directory.glob('*/tasks.md')):
+                if not index.parent.name.startswith('.'):
+                    task_topology.requirement_path(directory, index.parent.name)
+                    summaries.append(audit_view.build(root, Requirement(index.parent)))
+        print(json.dumps({'requirements': summaries}, ensure_ascii=False) if args.json
+              else '\n\n'.join(audit_view.render(item) for item in summaries) or '暂无AIWorkflow需求')
+        return
+    path = task_topology.requirement_path(directory, args.requirement)
     with lock(directory):
         if args.action == "init":
             init_requirement(path, args.goal)
             print(path / "tasks.md")
             return
+        if args.action == 'derive':
+            contract = {key: getattr(args, key) for key in ('reason', 'scope', 'deliverable', 'acceptance', 'statement')}
+            child = task_topology.derive(directory, args.requirement, args.task, args.child, args.goal, contract, init_requirement)
+            print(child / 'tasks.md')
+            return
+        if args.action == 'link':
+            task_topology.link(directory, args.requirement, args.parent, args.task, args.reason, args.statement)
+            print(f'已关联：{args.requirement} → {args.parent}/{args.task}')
+            return
         requirement = Requirement(path)
-        if args.action == "add":
+        if args.action == 'board':
+            data = audit_view.build(root, requirement, args.task)
+            print(json.dumps(data, ensure_ascii=False) if args.json else audit_view.render(data))
+        elif args.action == 'evidence':
+            data = (audit_view.legacy_evidence(requirement, args.evidence) if args.evidence.startswith(('record:', 'plan:'))
+                    else task_audit.load_evidence(requirement.audit_directory, args.evidence))
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        elif args.action in ('trace', '_observe-event'):
+            if args.action == 'trace':
+                event = {key: getattr(args, key) for key in ('kind', 'name', 'stage', 'task', 'summary', 'node', 'parent')}
+                event.update(source='declared', detail=json.loads(args.detail))
+            else:
+                raw = args.payload if args.payload is not None else sys.stdin.read(8 * 1024 * 1024 + 1)
+                if len(raw.encode('utf-8')) > 8 * 1024 * 1024:
+                    raise WorkflowError('观察记录超过8MiB，请拆分节点并保留缺口说明')
+                event = json.loads(raw)
+                if not isinstance(event, dict) or not {'kind', 'name', 'stage'} <= event.keys():
+                    raise WorkflowError('观察记录缺少类型、名称或阶段')
+                if not set(event) <= {'kind', 'name', 'stage', 'task', 'summary', 'detail', 'source', 'node', 'parent', 'run'}:
+                    raise WorkflowError('观察记录包含未知字段')
+                if event.get('source') not in ('pi-read', 'pi-command', 'pi-event', 'declared'):
+                    raise WorkflowError('内部记录必须明确来源；声明不得冒充观察')
+            if event.get('task'):
+                requirement.state(event['task'])
+            entry = task_audit.store_event(requirement.audit_directory, **event)
+            if entry['kind'] == 'skill':
+                task_audit.record_skill(requirement.audit_directory, name=entry['name'], stage=entry['stage'],
+                                        source=entry['source'] if entry['source'] in task_audit.SOURCES else 'pi-read',
+                                        task=entry.get('task'), purpose=None, evidence=entry['evidence'])
+            print(entry['id'])
+        elif args.action == "add":
             requirement.add(args.task, args.title, args.after, args.example, args.investigation, args.graphify_context,
                             getattr(args, 'graphify_audit', False))
             print(requirement.task_path(args.task))
@@ -702,6 +790,11 @@ def run(args, command):
             task_audit.record_skill(requirement.audit_directory, name=args.name, stage=args.stage,
                                     source=getattr(args, "source", "declared"), task=args.task,
                                     purpose=getattr(args, "purpose", None), evidence=args.evidence)
+            task_audit.store_event(requirement.audit_directory, kind='skill', name=args.name, stage=args.stage,
+                                   task=args.task, source=getattr(args, 'source', 'declared'),
+                                   summary=getattr(args, 'purpose', None) or args.name,
+                                   detail={'purpose': getattr(args, 'purpose', None), 'evidence_path': args.evidence,
+                                           'limitation': '此入口只证明声明/旧观察；原文需由实际观察事件保留'})
         elif args.action == "audit":
             audit_report(root, requirement, args.task, args.diff)
         elif args.action == "review":
@@ -715,7 +808,7 @@ def run(args, command):
                 task = args.task
             if not task:
                 raise WorkflowError("没有执行中的任务")
-            verify(root, requirement, task, command)
+            verify(root, requirement, task, command, args.check)
 
 
 def identifier(pattern):
@@ -737,12 +830,40 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     task_id = identifier(TASK_ID)
-    for action in ("init", "add", "status", "confirm", "start", "block", "resolve", "verify", "audit", "review", "skill", "_observe-skill", "graphify"):
+    for action in ("init", "add", "status", "confirm", "start", "block", "resolve", "verify", "audit", "review", "skill", "_observe-skill", "graphify", 'derive', 'link', 'board', 'evidence', 'trace', '_observe-event'):
         item = sub.add_parser(action)
-        item.add_argument("requirement", type=identifier(r"[a-zA-Z0-9][a-zA-Z0-9_-]*"))
+        item.add_argument("requirement", nargs='?' if action == 'board' else None,
+                          type=identifier(r"[a-zA-Z0-9][a-zA-Z0-9_-]*"))
         if action in ("add", "confirm", "start", "resolve", "review", "graphify"):
             item.add_argument("task", type=task_id)
-        if action == "init":
+        if action == 'derive':
+            item.add_argument('task', type=task_id)
+            item.add_argument('child', type=identifier(r'[a-zA-Z0-9][a-zA-Z0-9_-]*'))
+            for field in ('goal', 'reason', 'scope', 'deliverable', 'acceptance', 'statement'):
+                item.add_argument(f'--{field}', required=True, type=one_line)
+        elif action == 'link':
+            item.add_argument('parent', type=identifier(r'[a-zA-Z0-9][a-zA-Z0-9_-]*'))
+            item.add_argument('task', type=task_id)
+            item.add_argument('--reason', required=True, type=one_line)
+            item.add_argument('--statement', required=True, type=one_line)
+        elif action == 'board':
+            item.add_argument('task', nargs='?', type=task_id)
+            item.add_argument('--json', action='store_true')
+        elif action == 'evidence':
+            item.add_argument('evidence')
+            item.add_argument('--json', action='store_true')
+        elif action == 'trace':
+            item.add_argument('--task', type=task_id)
+            item.add_argument('--stage', required=True, choices=task_audit.STAGES)
+            item.add_argument('--kind', required=True, choices=('input', 'output', 'delegation', 'capability', 'gap'))
+            item.add_argument('--name', required=True, type=one_line)
+            item.add_argument('--summary', default='未提供摘要', type=one_line)
+            item.add_argument('--detail', default='{}')
+            item.add_argument('--node')
+            item.add_argument('--parent')
+        elif action == '_observe-event':
+            item.add_argument('--payload')
+        elif action == "init":
             item.add_argument("--goal", required=True, type=one_line)
         elif action == "add":
             item.add_argument("--title", required=True, type=one_line)
@@ -762,6 +883,7 @@ def main():
             item.add_argument("--detail", required=True, type=one_line)
         elif action == "verify":
             item.add_argument("--task", type=task_id)
+            item.add_argument('--check', type=one_line, help='稳定的验收项名称；其他项成功不能覆盖该项失败')
         elif action == "audit":
             item.add_argument("task", nargs="?", type=task_id)
             item.add_argument("--diff", action="store_true")
